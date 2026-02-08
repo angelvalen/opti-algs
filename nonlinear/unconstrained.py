@@ -1,7 +1,9 @@
 import math
+import inspect
 import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.linalg import solve_triangular
+
 
 
 def uniform_search(f, a, b, eps=1e-6, **kwargs):
@@ -138,8 +140,8 @@ def cyclic_coordinate_descent(f, x0, eps=1e-6, **kwargs):
             ei = np.zeros(n)
             ei[i] = 1
             g = lambda c: f(y + c*ei)
-            c_min = minimize_scalar(g).x
-            y += c_min*ei
+            lambda_ = minimize_scalar(g).x
+            y += lambda_*ei
             
         error = np.linalg.norm(x - y)
         x = y.copy()
@@ -163,8 +165,8 @@ def hooke_jeeves(f, x0, eps=1e-6, **kwargs):
             ei = np.zeros(n)
             ei[i] = 1
             g = lambda c: f(y + c*ei)
-            c_min = minimize_scalar(g).x
-            y += c_min*ei
+            lambda_ = minimize_scalar(g).x
+            y += lambda_*ei
 
         if np.linalg.norm(x - y) < eps:
             return x, f(x), iters
@@ -172,8 +174,8 @@ def hooke_jeeves(f, x0, eps=1e-6, **kwargs):
         else:
             d = y - x
             h = lambda c: f(y + c*d)
-            c_min = minimize_scalar(h).x
-            y += c_min*d
+            lambda_ = minimize_scalar(h).x
+            y += lambda_*d
             error = np.linalg.norm(x - y)
             x = y.copy()
             iters += 1
@@ -190,8 +192,8 @@ def steepest_descent(f, df, x0, eps=1e-6, **kwargs):
     while np.linalg.norm(g) >= eps:
         
         h = lambda c: f(x - c*g)
-        c_min = minimize_scalar(h).x
-        x -= c_min*g
+        lambda_ = minimize_scalar(h).x
+        x -= lambda_*g
         g = df(x)
         iters += 1
     
@@ -261,9 +263,133 @@ def levenberg_marquardt(f, x0, df, ddf, eps=1e-6, **kwargs):
     return x, f(x), iters
 
 
+def fletcher_reeves_quadratic(c, Q, x0, eps=1e-6, **kwargs):
+    
+    n = len(x0)
+    y = x0.copy()
+    f = lambda x: c.T.dot(x) + 1/2 * x.T.dot(Q).dot(x)
+    df = c + Q.dot(y)
+    d = np.zeros((n, n))
+    iters = 0
+
+    while np.linalg.norm(df) >= eps:
+        
+        # Build conjugate directions & update y
+        for j in range(n):
+            
+            d[j] = - df
+            for i in range(j):
+                d[j] += df.T.dot(Q).dot(d[i]) / d[i].T.dot(Q).dot(d[i]) * d[i]
+            
+            lambda_ = - df.T.dot(d[j]) / d[j].T.dot(Q).dot(d[j])
+            y += lambda_*d[j]
+            df = c + Q.dot(y)
+            iters += 1
+
+    return y, f(y), iters
+
+
+def fletcher_reeves(f, df, x0, eps=1e-6, **kwargs):
+
+    n = len(x0)
+    y = x0.copy()
+    g = df(y)
+    iters = 0
+
+    while np.linalg.norm(g) >= eps:
+
+        d = -g.copy()
+
+        for j in range(n):
+            
+            h = lambda c: f(y + c*d)
+            lambda_ = minimize_scalar(h).x
+            y += lambda_*d
+            new_g = df(y)
+
+            if j < n - 1:
+                alpha = new_g.T.dot(new_g) / g.T.dot(g)
+                d = - new_g + alpha*d
+            
+            g = new_g
+            iters += 1
+    
+    return y, f(y), iters
+
+
+def polak_ribiere(f, df, x0, eps=1e-6, **kwargs):
+
+    n = len(x0)
+    y = x0.copy()
+    g = df(y)
+    iters = 0
+
+    while np.linalg.norm(g) >= eps:
+
+        d = -g.copy()
+
+        for j in range(n):
+            
+            h = lambda c: f(y + c*d)
+            lambda_ = minimize_scalar(h).x
+            y += lambda_*d
+            new_g = df(y)
+
+            if j < n - 1:
+                alpha = new_g.T.dot(new_g - g) / g.T.dot(g)
+                d = - new_g + alpha*d
+            
+            g = new_g
+            iters += 1
+    
+    return y, f(y), iters
+
+
+def davidon_fletcher_powell(f, df, x0, D1=None, eps=1e-6, **kwargs):
+
+    n = len(x0)
+    y = x0.copy()
+    g = df(y)
+    D = np.identity(n) if D1 is None else D1.copy()
+    iters = 0
+
+    while np.linalg.norm(g) >= eps:
+
+        for j in range(n):
+
+            d = - D.dot(g)
+            h = lambda c: f(y + c*d)
+            lambda_ = minimize_scalar(h).x
+            y += lambda_*d
+            new_g = df(y)
+
+            if j < n - 1:
+                p = lambda_*d
+                q = new_g - g
+                D = D + np.outer(p, p) / p.T.dot(q) - D @ np.outer(q, q) @ D / q.T.dot(D).dot(q)
+                
+            g = new_g
+            iters += 1
+    
+    return y, f(y), iters
+
+
+def is_valid_test(test, algorithm):
+
+    sig = inspect.signature(algorithm)
+    
+    required_params = {
+        name for name, param in sig.parameters.items()
+        if param.default is inspect.Parameter.empty
+        and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
+    return required_params.issubset(test.keys())
+
+
 def run_tests(tests, algorithms):
 
-    for i, t in enumerate(tests):
+    for t in tests:
 
         real_min_point = t["min_point"]
         real_min_value = t["min_value"]
@@ -273,16 +399,18 @@ def run_tests(tests, algorithms):
         # Running algorithms
         for alg in algorithms:
 
-            print(f"Running {alg.__name__}:")
+            if is_valid_test(t, alg):
 
-            point, value, iters = alg(**t)
+                print(f"Running {alg.__name__}:")
 
-            print(f"- Approximated optimal point: {point}")
-            print(f"- Approximated optimal value: {value}")
-            print(f"- Number of iterations: {iters}")
+                point, value, iters = alg(**t)
 
-            error = np.linalg.norm(point - real_min_point)
-            print(f"Absolute error: {error}\n")
+                print(f"- Approximated optimal point: {point}")
+                print(f"- Approximated optimal value: {value}")
+                print(f"- Number of iterations: {iters}")
+
+                error = np.linalg.norm(point - real_min_point)
+                print(f"Absolute error: {error}\n")
 
 
 quadratic_1d = {
@@ -327,11 +455,21 @@ rosenbrock_2d = {
         "min_point": np.array([1, 1]),
         "min_value": 0,
         "x0": np.array([-1.0, 1.0]),
-        "eps": 1e-4,
+        "eps": 1e-6,
+}
+quadratic_fletcher_reeves = {
+        "name": "Quadratic for FR: 3*x_1^2 + 2*x_2^2 + 4*x_1*x_2 - 2*x_1 + 3*x_2",
+        "c": np.array([-2, 3]),
+        "Q": np.array([[6, 4],
+                       [4, 4]]),
+        "min_point": np.array([2.5, -3.25]),
+        "min_value": -7.375,
+        "x0": np.array([0.0, 0.0]),
+        "eps": 1e-6,
 }
 
-TESTS = [quadratic_2d, notes_example_2_2, rosenbrock_2d]
-ALGS = [levenberg_marquardt]
+TESTS = [quadratic_fletcher_reeves, notes_example_2_2, rosenbrock_2d]
+ALGS = [fletcher_reeves_quadratic, fletcher_reeves, davidon_fletcher_powell]
 
 """
 Hacer una test.py donde defina el objeto test, y que pueda elegir que funciones probar y que algortimos testear, 
@@ -342,11 +480,3 @@ Y que ponga para cada caso pues intervalos de inicio si hay, o derivadas que se 
 if __name__ == "__main__":
     run_tests(TESTS, ALGS)
             
-       
-        
-        
-
-
-
-
-
